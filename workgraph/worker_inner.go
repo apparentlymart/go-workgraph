@@ -1,6 +1,7 @@
 package workgraph
 
 import (
+	"sync"
 	"sync/atomic"
 )
 
@@ -18,12 +19,24 @@ type workerInner struct {
 	// This is an atomic pointer so we can perform the first pass of
 	// self-dependency checking without acquiring any locks.
 	awaiting atomic.Pointer[requestInner]
+
+	responsibleFor map[*requestInner]struct{}
+	mu             sync.Mutex
 }
 
 func newWorkerInner() *workerInner {
-	return &workerInner{}
+	return &workerInner{
+		responsibleFor: make(map[*requestInner]struct{}),
+	}
 }
 
 func (wi *workerInner) handleDropped() {
-
+	// If the caller-facing handle to this worker is dropped then any
+	// requests this worker was responsible cannot be resolved, so
+	// we'll force them to fail here.
+	wi.mu.Lock()
+	for req := range wi.responsibleFor {
+		req.resolveUsageFault(ErrUnresolved{RequestID: req.ResultID()})
+	}
+	wi.mu.Unlock()
 }

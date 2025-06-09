@@ -166,6 +166,9 @@ func (ri *requestInner) resolveExplicit(resolvingWorker *Worker, val any, err er
 		}
 		return
 	}
+	resolvingWorker.inner.mu.Lock()
+	defer resolvingWorker.inner.mu.Unlock()
+	delete(resolvingWorker.inner.responsibleFor, ri)
 
 	ri.result.Store(newExplicitResult(val, err))
 	ri.cond.Broadcast()
@@ -190,6 +193,7 @@ func (ri *requestInner) resolveUsageFault(err error) {
 		// previous resolution.
 		return
 	}
+
 	ri.result.Store(newUsageFaultResult(err))
 	ri.cond.Broadcast()
 }
@@ -202,7 +206,15 @@ func newRequestInner(responsibleWorker *workerInner) *requestInner {
 }
 
 func (ri *requestInner) setResponsibleWorker(new *workerInner) {
-	ri.responsible.Store(new)
+	new.mu.Lock()
+	defer new.mu.Unlock()
+	old := ri.responsible.Swap(new)
+	if old != nil {
+		old.mu.Lock()
+		defer old.mu.Unlock()
+		delete(old.responsibleFor, ri)
+	}
+	new.responsibleFor[ri] = struct{}{}
 }
 
 type requestResult struct {

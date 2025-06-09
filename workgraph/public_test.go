@@ -2,14 +2,18 @@ package workgraph_test
 
 import (
 	"fmt"
+	"runtime"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/apparentlymart/go-workgraph/workgraph"
 	"github.com/google/go-cmp/cmp"
 )
 
 func TestHappyPath(t *testing.T) {
+	defer runtime.GC()
+
 	mainWorker := workgraph.NewWorker()
 	greetingResolver, greetingPromise := workgraph.NewRequest[string](mainWorker)
 	greeteeResolver, greeteePromise := workgraph.NewRequest[string](mainWorker)
@@ -43,6 +47,8 @@ func TestHappyPath(t *testing.T) {
 }
 
 func TestSelfDependencyDirect(t *testing.T) {
+	defer runtime.GC()
+
 	mainWorker := workgraph.NewWorker()
 	resolver, promise := workgraph.NewRequest[string](mainWorker)
 	value, err := promise.Await(mainWorker)
@@ -60,6 +66,8 @@ func TestSelfDependencyDirect(t *testing.T) {
 }
 
 func TestSelfDependencyIndirect(t *testing.T) {
+	defer runtime.GC()
+
 	mainWorker := workgraph.NewWorker()
 	resolver1, promise1 := workgraph.NewRequest[string](mainWorker)
 	resolver2, promise2 := workgraph.NewRequest[string](mainWorker)
@@ -96,8 +104,6 @@ func TestSelfDependencyIndirect(t *testing.T) {
 }
 
 func TestUnresolved(t *testing.T) {
-	t.Skip("not implemented yet")
-
 	// This particular test is a little tricky because it's relying on behavior
 	// of the Go runtime's garbage collector that is not technically guaranteed:
 	// it's possible that the cleanup associated with a worker object may run
@@ -115,6 +121,8 @@ func TestUnresolved(t *testing.T) {
 		// an error instead of deadlocking.
 	}, resolver)
 
+	time.Sleep(5 * time.Millisecond) // some time for the worker to have been dropped
+	runtime.GC()
 	value, err := promise.Await(mainWorker)
 	if err == nil {
 		t.Fatalf("unexpected success with value %#v; want self-dependency error", value)
