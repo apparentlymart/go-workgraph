@@ -5,7 +5,7 @@ import (
 )
 
 // workerInner is the real representation of a worker, which participates
-// in the worker/result graph.
+// in the worker/request graph.
 //
 // The exported representation [Worker] is separated so that the only pointers
 // to it are from outside of this package and we can use its finalizer as
@@ -17,7 +17,7 @@ type workerInner struct {
 	//
 	// This is an atomic pointer so we can perform the first pass of
 	// self-dependency checking without acquiring any locks.
-	awaiting atomic.Pointer[resultInner]
+	awaiting atomic.Pointer[requestInner]
 }
 
 func newWorkerInner() *workerInner {

@@ -11,16 +11,16 @@ import (
 
 func TestHappyPath(t *testing.T) {
 	mainWorker := workgraph.NewWorker()
-	greetingResolver, greetingPromise := workgraph.NewPendingResult[string](mainWorker)
-	greeteeResolver, greeteePromise := workgraph.NewPendingResult[string](mainWorker)
+	greetingResolver, greetingPromise := workgraph.NewRequest[string](mainWorker)
+	greeteeResolver, greeteePromise := workgraph.NewRequest[string](mainWorker)
 	workgraph.WithNewAsyncWorker(func(w *workgraph.Worker) {
-		greetingResolver.ResolveSuccess(w, "Hello")
+		greetingResolver.ReportSuccess(w, "Hello")
 	}, greetingResolver)
 	workgraph.WithNewAsyncWorker(func(w *workgraph.Worker) {
 		// This nested worker is unnecessary and just here to make this test
 		// a little more interesting.
 		workgraph.WithNewAsyncWorker(func(w *workgraph.Worker) {
-			greeteeResolver.ResolveSuccess(w, "world")
+			greeteeResolver.ReportSuccess(w, "world")
 		}, greeteeResolver)
 	}, greeteeResolver)
 
@@ -44,7 +44,7 @@ func TestHappyPath(t *testing.T) {
 
 func TestSelfDependencyDirect(t *testing.T) {
 	mainWorker := workgraph.NewWorker()
-	resolver, promise := workgraph.NewPendingResult[string](mainWorker)
+	resolver, promise := workgraph.NewRequest[string](mainWorker)
 	value, err := promise.Await(mainWorker)
 	if err == nil {
 		t.Fatalf("unexpected success with value %#v; want self-dependency error", value)
@@ -53,23 +53,23 @@ func TestSelfDependencyDirect(t *testing.T) {
 	if !ok {
 		t.Fatalf("wrong error type %T; want %T", err, selfDepErr)
 	}
-	wantResultIDs := []workgraph.ResultID{resolver.ResultID()}
-	if diff := cmp.Diff(wantResultIDs, selfDepErr.ResultIDs); diff != "" {
+	wantResultIDs := []workgraph.RequestID{resolver.RequestID()}
+	if diff := cmp.Diff(wantResultIDs, selfDepErr.RequestIDs); diff != "" {
 		t.Error("wrong request ids\n" + diff)
 	}
 }
 
 func TestSelfDependencyIndirect(t *testing.T) {
 	mainWorker := workgraph.NewWorker()
-	resolver1, promise1 := workgraph.NewPendingResult[string](mainWorker)
-	resolver2, promise2 := workgraph.NewPendingResult[string](mainWorker)
+	resolver1, promise1 := workgraph.NewRequest[string](mainWorker)
+	resolver2, promise2 := workgraph.NewRequest[string](mainWorker)
 	workgraph.WithNewAsyncWorker(func(w *workgraph.Worker) {
 		val, err := promise2.Await(w)
-		resolver1.Resolve(w, val, err)
+		resolver1.Report(w, val, err)
 	}, resolver1)
 	workgraph.WithNewAsyncWorker(func(w *workgraph.Worker) {
 		val, err := promise1.Await(w)
-		resolver2.Resolve(w, val, err)
+		resolver2.Report(w, val, err)
 	}, resolver2)
 
 	value, err := promise1.Await(mainWorker)
@@ -80,17 +80,17 @@ func TestSelfDependencyIndirect(t *testing.T) {
 	if !ok {
 		t.Fatalf("wrong error type %T; want %T", err, selfDepErr)
 	}
-	t.Logf("affected request ids: %#v", selfDepErr.ResultIDs)
+	t.Logf("affected request ids: %#v", selfDepErr.RequestIDs)
 
 	// The reported ResultIDs are not guaranteed to be any particular order
 	// but we expect both to be present.
-	if got, want := len(selfDepErr.ResultIDs), 2; got != want {
+	if got, want := len(selfDepErr.RequestIDs), 2; got != want {
 		t.Fatalf("wrong number of failed request ids %d; want %d", got, want)
 	}
-	if !slices.Contains(selfDepErr.ResultIDs, resolver1.ResultID()) {
+	if !slices.Contains(selfDepErr.RequestIDs, resolver1.RequestID()) {
 		t.Errorf("resolver1's ResultID is not mentioned in the error")
 	}
-	if !slices.Contains(selfDepErr.ResultIDs, resolver2.ResultID()) {
+	if !slices.Contains(selfDepErr.RequestIDs, resolver2.RequestID()) {
 		t.Errorf("resolver2's ResultID is not mentioned in the error")
 	}
 }
@@ -107,7 +107,7 @@ func TestUnresolved(t *testing.T) {
 	// good place to start with debugging is to see if the GC behavior has
 	// changed in that new version.
 	mainWorker := workgraph.NewWorker()
-	resolver, promise := workgraph.NewPendingResult[string](mainWorker)
+	resolver, promise := workgraph.NewRequest[string](mainWorker)
 	workgraph.WithNewAsyncWorker(func(w *workgraph.Worker) {
 		// We intentionally don't resolve the promise here, instead
 		// just letting our worker go out of scope and thus hopefully
@@ -123,7 +123,7 @@ func TestUnresolved(t *testing.T) {
 	if !ok {
 		t.Fatalf("wrong error type %T; want %T", err, unresolvedErr)
 	}
-	if unresolvedErr.ResultID != resolver.ResultID() {
+	if unresolvedErr.RequestID != resolver.RequestID() {
 		t.Errorf("error has the wrong RequestID")
 	}
 }

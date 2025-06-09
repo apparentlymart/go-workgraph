@@ -37,16 +37,16 @@ type Worker struct {
 }
 
 // NewWorker allocates a new [Worker], optionally transferring responsibility
-// for resolving some results.
+// for resolving some requests.
 //
-// Callers are responsible for ensuring that a caller passing results to this
-// function was previously considered to be responsible for those results.
+// Callers are responsible for ensuring that a caller passing resolvers to this
+// function was previously considered to be responsible for those resolvers.
 // Although there are no immediate checks that the caller was already
-// responsible for the given results (the relationship between codepaths and
+// responsible for the given requests (the relationship between codepaths and
 // workers is the caller's concern), incorrect use of this can potentially be
 // detected later if the previous responsible worker subsequently attempts to
-// resolve
-func NewWorker(delegatedResults ...ResultContainer) *Worker {
+// resolve the request that was delegated.
+func NewWorker(delegatedResolvers ...ResolverContainer) *Worker {
 	// The new "inner" is initially not awaiting any result.
 	newInner := newWorkerInner()
 
@@ -54,8 +54,8 @@ func NewWorker(delegatedResults ...ResultContainer) *Worker {
 	// objects here without any self-dependency checking, because the new
 	// worker is initially not waiting for any results itself and so it
 	// cannot possibly participate in a self-dependency cycle.
-	for _, container := range delegatedResults {
-		for result := range container.ContainedResultResolvers() {
+	for _, container := range delegatedResolvers {
+		for result := range container.ContainedResolvers() {
 			inner := result.resultInner()
 			inner.setResponsibleWorker(newInner)
 		}
@@ -71,7 +71,7 @@ func NewWorker(delegatedResults ...ResultContainer) *Worker {
 	return ret
 }
 
-func WithNewAsyncWorker(f func(*Worker), delegatedResults ...ResultContainer) {
+func WithNewAsyncWorker(f func(*Worker), delegatedResults ...ResolverContainer) {
 	worker := NewWorker(delegatedResults...)
 	go f(worker)
 }

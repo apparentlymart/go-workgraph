@@ -8,15 +8,15 @@ import (
 	"weak"
 )
 
-// resultInner is the internal part of a result that is shared between its
-// resolver and its consumers.
+// requestInner is the internal part of a request that is shared between its
+// resolver and its promises.
 //
 // This inner part intentionally has the compile-time-chosen result type
-// erased, to allow [AnyResultResolver] to be implemented by all instantiations
-// of the generic [ResultResolver] type.
-type resultInner struct {
+// erased, to allow [AnyResolver] to be implemented by all instantiations
+// of the generic [Resolver] type.
+type requestInner struct {
 	// responsible is the primary representation of the directed graph edge
-	// between a result and the worker that's currently responsible for
+	// between a request and the worker that's currently responsible for
 	// resolving it. This is never nil but it can change over time as
 	// responsibility is delegated between workers.
 	//
@@ -24,20 +24,20 @@ type resultInner struct {
 	// self-dependency checking without acquiring any locks.
 	responsible atomic.Pointer[workerInner]
 
-	mu         sync.Mutex
-	cond       *sync.Cond
-	resolution atomic.Pointer[resultResolution]
+	mu     sync.Mutex
+	cond   *sync.Cond
+	result atomic.Pointer[requestResult]
 }
 
-func (ri *resultInner) ResultID() ResultID {
-	return ResultID{
+func (ri *requestInner) ResultID() RequestID {
+	return RequestID{
 		ptr: weak.Make(ri),
 	}
 }
 
-func (ri *resultInner) await(requestingWorker *Worker) *resultResolution {
+func (ri *requestInner) await(requestingWorker *Worker) *requestResult {
 	// This function deals with the "slow-path" await, after
-	// [ResultConsumer.Await] dealt with some fast-path situations. However,
+	// [Promise.Await] dealt with some fast-path situations. However,
 	// we haven't been holding any locks so far and so we'll need to recheck
 	// some things in case the situation has changed due to the actions of
 	// another concurrent goroutine.
@@ -45,24 +45,28 @@ func (ri *resultInner) await(requestingWorker *Worker) *resultResolution {
 	// The overall idea of this is based on the ideas in
 	// "An Ownership Policy and Deadlock Detector for Promises" by Caleb Voss
 	// and Vivek Sarkar at Georgia Institute of Technology, arXiv:2101.01312v1.
-	// The following is essentially the logic from their "Algorithm 2".
+	// The following is essentially the logic from their "Algorithm 2" ported
+	// to Go. We use atomic memory accesses to avoid acquring broadly-scoped
+	// locks that would likely cause contention between workers.
 
 	swapped := requestingWorker.inner.awaiting.CompareAndSwap(nil, ri)
 	if !swapped {
 		// Apparently another goroutine has begun waiting with this worker
-		// in the meantime since [ResultConsumer.Await] did its initial check.
-		panic(fmt.Sprintf("worker %p awaits multiple results", requestingWorker.inner))
+		// in the meantime since [Promise.Await] did its initial check.
+		panic(fmt.Sprintf("worker %p awaits multiple promises", requestingWorker.inner))
 	}
 	defer func() {
 		// Before we return we need to set "awaiting" back to nil again to
-		// let the requesting worker await other results, but since we might
+		// let the requesting worker await other promises, but since we might
 		// return before we aquire locks we could again be racing with another
 		// goroutine trying to use the same worker object, so we'll detect
 		// that here.
-		// (This corresponds to the "try/finally" pseudocode
+		// (This corresponds to the "try/finally" pseudocode in at the
+		// end of the algorithm from the paper, since Go does not have
+		// exceptions.)
 		swappedBack := requestingWorker.inner.awaiting.CompareAndSwap(ri, nil)
 		if !swappedBack {
-			panic(fmt.Sprintf("worker %p awaits multiple results", requestingWorker.inner))
+			panic(fmt.Sprintf("worker %p awaits multiple promises", requestingWorker.inner))
 		}
 	}()
 
@@ -74,19 +78,19 @@ func (ri *resultInner) await(requestingWorker *Worker) *resultResolution {
 	selfDependency, _ := detectSelfDependency(ri, requestingWorker.inner, false)
 	if selfDependency {
 		// We've found a self-dependency but we want to be able to report
-		// which results were affected by it and so we'll repeat the same
-		// work again but this time collect up all of the result nodes we
+		// which requests were affected by it and so we'll repeat the same
+		// work again but this time collect up all of the request nodes we
 		// encounter along the way. This redundancy allows us to avoid
-		// allocating the result slice on the happy path. We could potentially
+		// allocating the request slice on the happy path. We could potentially
 		// get a slightly different result this time but nonetheless we'll
 		// still be reporting at least some of the results that were affected
 		// by the cycle.
 		_, failedResults := detectSelfDependency(ri, requestingWorker.inner, true)
-		resultIDs := make([]ResultID, 0, len(failedResults))
+		resultIDs := make([]RequestID, 0, len(failedResults))
 		for _, result := range failedResults {
 			resultIDs = append(resultIDs, result.ResultID())
 		}
-		err := ErrSelfDependency{ResultIDs: resultIDs}
+		err := ErrSelfDependency{RequestIDs: resultIDs}
 		for _, result := range failedResults {
 			result.resolveUsageFault(err)
 		}
@@ -100,7 +104,7 @@ func (ri *resultInner) await(requestingWorker *Worker) *resultResolution {
 	// safe for us to block without causing a deadlock.
 	ri.mu.Lock()
 	for {
-		if resolution := ri.resolution.Load(); resolution != nil {
+		if resolution := ri.result.Load(); resolution != nil {
 			ri.mu.Unlock()
 			return resolution
 		}
@@ -108,55 +112,62 @@ func (ri *resultInner) await(requestingWorker *Worker) *resultResolution {
 	}
 }
 
-func detectSelfDependency(currentResult *resultInner, requestingWorker *workerInner, collectFailedResults bool) (bool, []*resultInner) {
-	// We populate this only if collectFailedResults is true. Otherwise we
+// detectSelfDependency is the main loop for self-dependency detection in
+// [requestInner.await], factored out so that we can run it a second time in
+// a more expensive mode (with collectFailedReqs set) to collect context when
+// we're going to report an error.
+func detectSelfDependency(currentReq *requestInner, requestingWorker *workerInner, collectFailedReqs bool) (bool, []*requestInner) {
+	// We populate this only if collectFailedReqs is true. Otherwise we
 	// just ignore it to avoid allocating.
-	var failedResults []*resultInner
+	var failedReqs []*requestInner
 
-	currentWorker := currentResult.responsible.Load()
-	if collectFailedResults {
-		failedResults = append(failedResults, currentResult)
+	currentWorker := currentReq.responsible.Load()
+	if collectFailedReqs {
+		failedReqs = append(failedReqs, currentReq)
 	}
 	for currentWorker != requestingWorker {
-		if currentResult == nil {
+		if currentReq == nil {
 			break
 		}
-		nextResult := currentWorker.awaiting.Load()
-		if nextResult == nil {
+		nextReq := currentWorker.awaiting.Load()
+		if nextReq == nil {
 			break
 		}
-		if currentResult.responsible.Load() != currentWorker {
+		if currentReq.responsible.Load() != currentWorker {
 			break
 		}
-		currentResult = nextResult
-		currentWorker = currentResult.responsible.Load()
-		if collectFailedResults {
-			failedResults = append(failedResults, currentResult)
+		currentReq = nextReq
+		currentWorker = currentReq.responsible.Load()
+		if collectFailedReqs {
+			failedReqs = append(failedReqs, currentReq)
 		}
 	}
 
 	// If we've ended up back where we started then we've detected self-dependency.
-	return currentWorker == requestingWorker, failedResults
+	return currentWorker == requestingWorker, failedReqs
 }
 
-func (ri *resultInner) resolveExplicit(resolvingWorker *Worker, val any, err error) {
+// resolveExplicit is the main resolution function for an "explicit" result,
+// meaning that the result is being provided by the worker that's responsible
+// for doing so.
+func (ri *requestInner) resolveExplicit(resolvingWorker *Worker, val any, err error) {
 	ri.mu.Lock()
 	defer ri.mu.Unlock()
 	if got, want := resolvingWorker.inner, ri.responsible.Load(); got != want {
-		panic(fmt.Sprintf("result was resolved by worker %p, but %p was responsible", got, want))
+		panic(fmt.Sprintf("request was resolved by worker %p, but %p was responsible", got, want))
 	}
-	if resolution := ri.resolution.Load(); resolution != nil {
+	if resolution := ri.result.Load(); resolution != nil {
 		// This is already resolved. If it was resolved with a usage error then
 		// we'll just silently ignore this call to avoid changing the
 		// previously-reported outcome, but if the previous resolution was also
 		// explicit then that suggests a bug in the caller and so we'll panic.
 		if resolution.IsExplicit() {
-			panic("result resolved multiple times")
+			panic("request resolved multiple times")
 		}
 		return
 	}
 
-	ri.resolution.Store(newExplicitResolution(val, err))
+	ri.result.Store(newExplicitResult(val, err))
 	ri.cond.Broadcast()
 
 	// We'll make sure that Worker can't get collected until we're ready to
@@ -167,36 +178,39 @@ func (ri *resultInner) resolveExplicit(resolvingWorker *Worker, val any, err err
 	runtime.KeepAlive(resolvingWorker)
 }
 
-func (ri *resultInner) resolveUsageFault(err error) {
+// resolveUsageFault is a variant resolution function for situations where we
+// force an errored resolution from inside this library to report that the
+// library has been used incorrectly.
+func (ri *requestInner) resolveUsageFault(err error) {
 	ri.mu.Lock()
 	defer ri.mu.Unlock()
-	if resolution := ri.resolution.Load(); resolution != nil {
+	if result := ri.result.Load(); result != nil {
 		// This is already resolved, so we'll leave the existing resolution
 		// in place because some consumers might already have observed the
 		// previous resolution.
 		return
 	}
-	ri.resolution.Store(newUsageFaultResolution(err))
+	ri.result.Store(newUsageFaultResult(err))
 	ri.cond.Broadcast()
 }
 
-func newResultInner(responsibleWorker *workerInner) *resultInner {
-	ret := &resultInner{}
+func newRequestInner(responsibleWorker *workerInner) *requestInner {
+	ret := &requestInner{}
 	ret.cond = sync.NewCond(&ret.mu)
 	ret.setResponsibleWorker(responsibleWorker)
 	return ret
 }
 
-func (ri *resultInner) setResponsibleWorker(new *workerInner) {
+func (ri *requestInner) setResponsibleWorker(new *workerInner) {
 	ri.responsible.Store(new)
 }
 
-type resultResolution struct {
+type requestResult struct {
 	value any
 	err   error
 }
 
-func newExplicitResolution(value any, err error) *resultResolution {
+func newExplicitResult(value any, err error) *requestResult {
 	if value == nil {
 		// Should not be possible because we should always get here through
 		// a generic function that enforces value always being a valid value
@@ -204,32 +218,32 @@ func newExplicitResolution(value any, err error) *resultResolution {
 		// can be nil, the interface value containing it would not be nil.)
 		panic("explicit resolution with nil value")
 	}
-	return &resultResolution{
+	return &requestResult{
 		value: value,
 		err:   err,
 	}
 }
 
-func newUsageFaultResolution(err error) *resultResolution {
-	return &resultResolution{
+func newUsageFaultResult(err error) *requestResult {
+	return &requestResult{
 		value: nil, // indicates a usage fault resolution
 		err:   err,
 	}
 }
 
-func (rr *resultResolution) IsExplicit() bool {
+func (rr *requestResult) IsExplicit() bool {
 	// Explicit resolutions always have a non-nil value, even though what's
 	// stored in the interface might be a typed nil pointer itself.
 	return rr.value != nil
 }
 
-func resolutionRet[T any](resolution *resultResolution) (T, error) {
+func resultRet[T any](result *requestResult) (T, error) {
 	// The type assertion below should fail only if value is nil to
 	// represent a usage error, in which case we'll just return the
 	// zero value of T.
 	// (Even if T is a type that can be "nil" itself, a non-usage
 	// error will always be saved as a non-nil interface which
 	// might contain a nil value of T.)
-	value, _ := resolution.value.(T)
-	return value, resolution.err
+	value, _ := result.value.(T)
+	return value, result.err
 }
