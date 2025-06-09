@@ -71,6 +71,12 @@ func NewWorker(delegatedResolvers ...ResolverContainer) *Worker {
 	return ret
 }
 
+// WithNewSyncWorker is a helper wrapper around [NewWorker] for the common case
+// of associating a new worker with a new goroutine.
+//
+// The [Worker] passed to the given function is immediately responsible for
+// any resolvers given as additional arguments, as if those had been passed
+// to [NewWorker].
 func WithNewAsyncWorker(f func(*Worker), delegatedResults ...ResolverContainer) {
 	worker := NewWorker(delegatedResults...)
 	go f(worker)
