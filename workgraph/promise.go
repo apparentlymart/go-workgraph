@@ -28,3 +28,7 @@ func (rc Promise[T]) Await(requestingWorker *Worker) (T, error) {
 	result := rc.inner.await(requestingWorker)
 	return resultRet[T](result)
 }
+
+func (rc Promise[T]) isNil() bool {
+	return rc.inner == nil
+}

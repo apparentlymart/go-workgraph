@@ -47,3 +47,11 @@ func (rid RequestID) String() string {
 func (rid RequestID) GoString() string {
 	return fmt.Sprintf("workgraph.RequestID(%s)", rid.String())
 }
+
+// NoRequest is the zero value of [RequestID], representing the absence of
+// any request.
+//
+// No actual request has this request ID; this value can be used, for example,
+// when a caller asks for the request ID for a request that hasn't actually
+// started yet, such as with [Once.RequestID].
+var NoRequest RequestID
