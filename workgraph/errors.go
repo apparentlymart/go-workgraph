@@ -7,6 +7,12 @@ package workgraph
 // This suggests a bug in the implementation of the responsible worker, since
 // it should ensure that all requests it is responsible for are either resolved
 // or delegated to another worker before its [Worker] object goes out of scope.
+//
+// Note that the Go runtime does not guarantee to collect unused objects at
+// any particular time, and so this is only a best-effort mechanism to try to
+// ensure that workers awaiting unresolved promises can unblock themselves
+// *eventually*, but that might actually be some time after the relevant worker
+// stops running.
 type ErrUnresolved struct {
 	// RequestID is the request that was unresolved. This is always the ID of
 	// the request whose [Promise] the Await method was called on.
