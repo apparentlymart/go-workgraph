@@ -116,4 +116,107 @@
 // try to build a wrapping abstraction that's better tailored to your specific
 // use-case and which encapsulates the workgraph rules in terms of its own
 // rules that are more natural for the overall shape of your program.
+//
+// # Interaction with iter.Seq and iter.Seq2
+//
+// Programs that use "range-over-function" using [iter.Seq] and [iter.Seq2]
+// values must take some extra care when using workgraph.
+//
+// In Go, range-over-function is implemented (roughly speaking) by transforming
+// the loop body into an anonymous function whose signature matches the argument
+// expected by the sequence function, and then passing that anonymous function
+// into the sequence function. For example, consider:
+//
+//		func getNames(worker workgraph.Worker, promises []workgraph.Promise[string]) iter.Seq[string] {
+//		    return func(yield func(string) bool) {
+//		        for promise := range promises {
+//		            name := promise.Await(worker)
+//		            if !yield(name) {
+//		                return
+//		            }
+//		        }
+//		    }
+//		}
+//
+//		func main() {
+//		    worker := workgraph.NewWorker()
+//		    promises := startVariousRequests(worker)
+//		    for name := range getNames(worker, promises) {
+//		        if name == "STOP!" {
+//		            break
+//		        }
+//	            if name == "special" {
+//	                specialName, err := getSpecialName(worker)
+//	                 // (...error handling...)
+//		            fmt.Println(specialName)
+//	                continue
+//	            }
+//		        fmt.Println(name)
+//		    }
+//		}
+//
+// The Go compiler reinterprets the main function as something roughly like the
+// following:
+//
+//		func main() {
+//	        worker := workgraph.NewWorker()
+//	        promises := startVariousRequests(worker)
+//	        eachName := getNames(worker, promises)
+//	        eachName(func(name string) bool {
+//	            if name == "STOP!" {
+//	                return false
+//	            }
+//	            if name == "special" {
+//	                specialName, err := getSpecialName(worker)
+//	                // (...error handling...)
+//		            fmt.Println(specialName)
+//	                return true
+//	            }
+//		        fmt.Println(name)
+//	            return true
+//	        })
+//		}
+//
+// (This is a very simplified example. For full details on this transformation,
+// refer to [the Go compiler's rangefunc package].)
+//
+// Notice in particular that once reaching the `for` loop from the original
+// source code, control immediately transfers to the sequence function
+// ("eachName" in this example) and then each time it calls "yield" it is
+// directly calling the anonymous function representing the loop body as a
+// normal function call, allowing it to run until it returns a bool value to
+// represent whether to continue iterating or not.
+//
+// Because these two functions are trading off control over a single goroutine,
+// both the loop body and the sequence function MUST use the same [Worker]
+// in order to correctly follow the workgraph rules. If they each attempt to
+// use their own worker then these two workers would effectively block each
+// other using a mechanism other than [Promise.Await] and thus prevent workgraph
+// from detecting any self-dependency problems between those two workers, which
+// could therefore lead to a deadlock at runtime.
+//
+// To help avoid accidentally using different workers for loop body vs.
+// sequence function, follow the structure in the above example where the
+// function that returns the sequence function is called directly in the
+// range clause while passing in the worker it should use, and then the same
+// worker is used directly inside the loop body. If possible, completely avoid
+// allowing any [iter.Seq] or [iter.Seq2] value that has captured a [Worker]
+// to become accessible from code running on any other goroutine.
+//
+// That guidance only applies to synchronous work done inside the loop body
+// and sequence function. If either of those participants starts a new goroutine
+// then code running in the new goroutine should still have its own [Worker]
+// and the goroutines should cooperate using [Promise.Await] with their
+// respective worker objects as usual.
+//
+// [the Go compiler's rangefunc package]: https://pkg.go.dev/cmd/compile/internal/rangefunc
 package workgraph
+
+import (
+	"iter"
+)
+
+// The following are here only so we can import "iter" to support links in
+// the documentation above.
+type _ = iter.Seq[struct{}]
+type _ = iter.Seq2[struct{}, struct{}]
